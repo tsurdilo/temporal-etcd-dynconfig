@@ -67,13 +67,16 @@ cd /path/to/temporal
 git checkout v1.31.0   # use the tag matching your deployment
 ```
 
-**Step 2** — in your `go.mod`, add a replace directive pointing at that checkout:
+**Step 2** — in your `go.mod`, add replace directives for both the Temporal server and this library. Neither is published to the module proxy, so both require a local path:
 
 ```
-replace go.temporal.io/server => /path/to/temporal
+replace (
+    go.temporal.io/server                         => /path/to/temporal
+    github.com/temporalio/temporal-etcd-dynconfig => /path/to/temporal-etcd-dynconfig
+)
 ```
 
-> **Important:** always point the replace directive at a release tag checkout, not `master`. The `master` branch of the Temporal server uses pre-release versions of `go.temporal.io/api` that are not published to the module proxy, which will break `go mod tidy` for anyone who does not also have those pre-release modules locally.
+> **Important:** always point the `go.temporal.io/server` replace directive at a release tag checkout, not `master`. The `master` branch uses pre-release versions of `go.temporal.io/api` that are not published to the module proxy, which will break `go mod tidy` for anyone who does not also have those pre-release modules locally.
 
 ## Configuration
 
@@ -137,58 +140,107 @@ maxCallSendMsgSize:    4194304
 | `dialTimeout` | no | `2s` | Timeout for the initial etcd connection. |
 | `maxCallSendMsgSize` | no | `4 MiB` | Max gRPC message size. Must match etcd server's `--max-request-bytes`. |
 
+### Environment variable wiring
+
+The config fields map naturally to environment variables. A typical container entrypoint sets:
+
+| Env var | Maps to | Example |
+|---|---|---|
+| `ETCD_ENDPOINTS` | `etcdConfigs[0].endpoints` (comma-separated) | `etcd-1:2379,etcd-2:2379` |
+| `ETCD_KEY_PREFIX` | `globalKeyPrefix` | `/temporal/dynamicconfig/` |
+| `ETCD_CLIENT_NAME` | `clientName` (and `etcdConfigs[0].name`) | `temporal-server` |
+| `ETCD_DISABLE_TLS` | `disableTLS` (`"true"` to disable) | `true` |
+
+Example wiring in Go:
+
+```go
+etcdCfg := etcddynconfig.Config{
+    EtcdConfigs: []etcddynconfig.EtcdConfig{{
+        Name:      os.Getenv("ETCD_CLIENT_NAME"),
+        Endpoints: strings.Split(os.Getenv("ETCD_ENDPOINTS"), ","),
+    }},
+    GlobalKeyPrefix: os.Getenv("ETCD_KEY_PREFIX"),
+    ClientName:      os.Getenv("ETCD_CLIENT_NAME"),
+    DisableTLS:      os.Getenv("ETCD_DISABLE_TLS") == "true",
+}
+etcdCfg.EnsureDefaults()
+```
+
 ## Usage
 
 ### Wire into OSS Temporal server
+
+The key constraint is that the etcd dynconfig client and the Temporal server must share a single `metrics.Handler`. If you pass a separate handler to each, the server starts its own Prometheus HTTP listener that conflicts with the one already bound by the handler you gave the etcd client — server metrics will fail to start or emit nothing.
+
+Build the handler once from the server config, pass it to `NewClient`, and pass the same instance to `temporal.WithCustomMetricsHandler`.
 
 ```go
 package main
 
 import (
     "context"
+    "log"
 
     etcddynconfig "github.com/temporalio/temporal-etcd-dynconfig"
-    "go.temporal.io/server/common/log"
+    "go.temporal.io/server/common/config"
+    temporallog "go.temporal.io/server/common/log"
+    "go.temporal.io/server/common/metrics"
     "go.temporal.io/server/temporal"
 )
 
 func main() {
-    logger := log.NewZapLogger(log.BuildZapLogger(log.Config{Level: "info"}))
     ctx := context.Background()
 
-    cfg := etcddynconfig.Config{
-        EtcdConfigs: []etcddynconfig.EtcdConfig{
-            {Name: "primary", Endpoints: []string{"127.0.0.1:2379"}},
-        },
+    // Load the Temporal server config (config file path, env, etc. — see config.Load docs).
+    cfg, err := config.Load(config.WithEmbedded())
+    if err != nil {
+        log.Fatalf("load config: %v", err)
+    }
+
+    logger := temporallog.NewZapLogger(temporallog.BuildZapLogger(cfg.Log))
+
+    // Build ONE shared metrics handler from the server's own metrics config.
+    // This handler is passed to both NewClient and WithCustomMetricsHandler so
+    // they share a single Prometheus registry and HTTP listener.
+    metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
+    if err != nil {
+        log.Fatalf("create metrics handler: %v", err)
+    }
+
+    etcdCfg := etcddynconfig.Config{
+        EtcdConfigs:     []etcddynconfig.EtcdConfig{{Name: "primary", Endpoints: []string{"127.0.0.1:2379"}}},
         GlobalKeyPrefix: "/temporal/dynamicconfig/",
         DisableTLS:      true,
         ClientName:      "temporal-server",
     }
-    cfg.EnsureDefaults()
+    etcdCfg.EnsureDefaults()
 
     // Create the raw etcd client (performs startup connectivity check).
-    etcdClient := etcddynconfig.NewEtcdClient(cfg, logger)
+    etcdClient := etcddynconfig.NewEtcdClient(etcdCfg, logger)
     defer etcdClient.Close()
 
-    // Create the dynamic config client.
-    // Pass your server's metrics.Handler so dynconfig metrics are emitted alongside
-    // all other Temporal server metrics. Use metrics.NoopMetricsHandler to opt out.
-    dcClient, err := etcddynconfig.NewClient(ctx, etcdClient, cfg.GlobalKeyPrefix, logger, metricsHandler)
+    // Tag dynconfig metrics with the service(s) this process is running.
+    dcMetrics := metricsHandler.WithTags(metrics.StringTag("service_name", "frontend,history,matching,worker"))
+
+    dcClient, err := etcddynconfig.NewClient(ctx, etcdClient, etcdCfg.GlobalKeyPrefix, logger, dcMetrics)
     if err != nil {
-        logger.Fatal("failed to create dynamic config client", ...)
+        log.Fatalf("create etcd dynconfig client: %v", err)
     }
     defer dcClient.Stop()
 
-    // Pass it to the Temporal server.
     server, err := temporal.NewServer(
-        temporal.WithConfig(temporalCfg),
+        temporal.WithConfig(cfg),
+        temporal.WithLogger(logger),
         temporal.WithDynamicConfigClient(dcClient),
-        // ... other options
+        temporal.WithCustomMetricsHandler(metricsHandler), // same handler — prevents duplicate listener
+        temporal.InterruptOn(temporal.InterruptCh()),
     )
     if err != nil {
-        logger.Fatal("failed to create server", ...)
+        log.Fatalf("create server: %v", err)
     }
-    server.Start()
+    if err := server.Start(); err != nil {
+        log.Fatalf("start server: %v", err)
+    }
 }
 ```
 
@@ -370,19 +422,34 @@ Backoff on reload failure: 100ms → doubles each attempt → caps at 30s.
 
 ## Metrics
 
-The client emits metrics through the same `metrics.Handler` the Temporal server already uses — Prometheus, OpenTelemetry, or any other backend your server is configured with. Pass the server's scoped handler so metrics are automatically tagged with `service` and `host_name` alongside all other server metrics.
+The client emits metrics through the same `metrics.Handler` the Temporal server already uses — Prometheus, OpenTelemetry, or any other backend your server is configured with.
+
+**You must share a single handler between the etcd client and the Temporal server.** Build it once with `metrics.MetricsHandlerFromConfig`, pass it to `NewClient`, and pass the same instance to `temporal.WithCustomMetricsHandler`. Without `WithCustomMetricsHandler`, the server starts its own Prometheus HTTP listener that conflicts with the one already bound by the handler you passed to `NewClient` — server metrics will fail to start or emit nothing.
 
 ```go
-dcClient, err := etcddynconfig.NewClient(ctx, etcdClient, prefix, logger, metricsHandler)
+metricsHandler, err := metrics.MetricsHandlerFromConfig(logger, cfg.Global.Metrics)
+
+// Tag dynconfig metrics with the Temporal service name(s) for this process.
+dcClient, err := etcddynconfig.NewClient(ctx, etcdClient, prefix, logger,
+    metricsHandler.WithTags(metrics.StringTag("service_name", "frontend")),
+)
+
+server, err := temporal.NewServer(
+    temporal.WithDynamicConfigClient(dcClient),
+    temporal.WithCustomMetricsHandler(metricsHandler), // same handler — no duplicate listener
+    // ...
+)
 ```
 
-Pass `metrics.NoopMetricsHandler` to disable metrics entirely.
+Pass `metrics.NoopMetricsHandler` to `NewClient` to disable dynconfig metrics entirely (you can still pass the real handler to `WithCustomMetricsHandler` for server metrics).
 
 ### Emitted metrics
 
+All metrics inherit any tags set on the `metrics.Handler` passed to `NewClient` — for example, `service_name` if the caller scoped the handler with `metricsHandler.WithTags(metrics.StringTag("service_name", "frontend"))`.
+
 | Metric | Type | Tags | Description |
 |---|---|---|---|
-| `dynconfig_key_updates_total` | counter | `operation` (DynamicConfigUpdate, DynamicConfigDelete), `key` (config key name), `service_name` | Incremented on every key change received from etcd. Each server process increments independently — with 3 frontends + 5 history hosts + 2 matching + 1 worker, a single `etcdctl put` produces 11 increments across all services. |
+| `dynconfig_key_updates_total` | counter | `operation` (DynamicConfigUpdate, DynamicConfigDelete), `key` (config key name) | Incremented on every key change received from etcd. Each server process increments independently — with 3 frontends + 5 history hosts + 2 matching + 1 worker, a single `etcdctl put` produces 11 increments across all services. |
 | `dynconfig_watch_reconnects_total` | counter | `reason` (compacted, stream_ended) | Incremented whenever the watch supervisor has to reload and reopen the stream. A spike here indicates etcd instability. |
 | `dynconfig_watch_active` | gauge | — | `1` while the watch stream is running, `0` while stopped or reconnecting. Alert on this going to `0`. |
 | `dynconfig_keys_loaded` | gauge | — | Number of keys in the in-memory map after each full reload. |
