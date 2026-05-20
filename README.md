@@ -1,6 +1,16 @@
 # temporal-etcd-dynconfig
 
-An etcd-backed dynamic config client for OSS Temporal server. Drop-in replacement for the file-based dynamic config client — changes propagate in near-realtime via etcd watch instead of polling a file.
+OSS Temporal Server ships with a file-based dynamic config client. It works, but it has real operational limits: you edit a YAML file, wait up to 10 seconds for the poll interval, and repeat that edit on every server host. In a multi-host or multi-cluster deployment this becomes error-prone — hosts can diverge silently, passive clusters drift from active ones, and there is no audit trail for what changed when.
+
+This library replaces that client with one backed by etcd. All Temporal server hosts watch the same etcd prefix and receive config changes simultaneously via etcd's watch API — no polling, no per-host file management, no drift. A single `etcdctl put` (or a call to `WriteConfig`) propagates to every host in the cluster within milliseconds.
+
+It implements both `dynamicconfig.Client` and `dynamicconfig.NotifyingClient`, so Temporal uses push-based updates rather than polling. It is a drop-in replacement: wire it in at server startup, point it at your etcd cluster, and the rest of your server code is unchanged.
+
+**When to use this:**
+- You run multiple Temporal server hosts and want config changes applied simultaneously across all of them
+- You run active/passive multi-cluster Temporal and want a single source of truth for dynamic config
+- You run multiple environments (prod, staging, dev) and want prefix-isolated config on a shared etcd cluster
+- You want an audit log of every config change with old and new values
 
 ## Table of contents
 
