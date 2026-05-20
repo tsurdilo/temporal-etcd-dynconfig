@@ -1,0 +1,16 @@
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Go
+vendor/
+*.out
+*.test
+*.prof
+coverage.out
+
+# OS
+.DS_Store
+Thumbs.db

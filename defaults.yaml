@@ -1,0 +1,130 @@
+# Default dynamic configuration for Temporal Server (etcd-backed).
+#
+# This file is embedded into the temporal-etcd-dynconfig binary and applied
+# automatically on first start if a key does not already exist in etcd.
+# Existing keys are never overwritten — customer values always win.
+#
+# Format: identical to the OSS file-based dynamic config format.
+# Each key maps to a list of constrained values. An entry with no constraints
+# applies globally; entries with constraints apply to the matching scope only.
+#
+# To override any value after the cluster is running:
+#   etcdctl --endpoints=http://localhost:2379 put temporal/dynamicconfig/<key> '- value: <new-value>'
+
+# ---------------------------------------------------------------------------
+# Frontend
+# ---------------------------------------------------------------------------
+
+# Maximum RPS across all namespaces for the entire frontend fleet.
+frontend.globalRPS:
+  - value: 6000
+
+# Maximum RPS per namespace across the frontend fleet.
+frontend.globalNamespaceRPS:
+  - value: 1600
+
+# Maximum RPS for visibility (list) operations per namespace.
+# Default is 10 — almost always too low for production. Raise if you see
+# RESOURCE_EXHAUSTED on Visibility calls.
+frontend.namespaceRPS.visibility:
+  - value: 50
+
+# Maximum RPS for visibility operations fleet-wide.
+frontend.globalNamespaceRPS.visibility:
+  - value: 500
+
+# Maximum concurrent namespaces.
+frontend.namespaceCount:
+  - value: 2000
+
+# Maximum concurrent namespaces fleet-wide.
+frontend.globalNamespaceCount:
+  - value: 20000
+
+# Maximum persistence QPS for frontend.
+frontend.persistenceMaxQPS:
+  - value: 2400
+
+# Minimum time a client must wait before sending a keepalive ping.
+frontend.keepAliveMinTime:
+  - value: 10s
+
+# Allow keepalive pings even when there are no active streams.
+frontend.keepAlivePermitWithoutStream:
+  - value: true
+
+# Percentage of unreachable history hosts that triggers frontend NOT_SERVING.
+# For a 2-pod fleet: 1 pod unreachable = 50%, so keep this at or above 0.50.
+# Lower this toward 0.20 for larger fleets (5+ pods).
+frontend.historyHostErrorPercentage:
+  - value: 0.50
+
+# ---------------------------------------------------------------------------
+# History
+# ---------------------------------------------------------------------------
+
+# Enable size-based eviction for the history cache (recommended for production).
+history.cacheSizeBasedLimit:
+  - value: true
+
+# Maximum bytes for the host-level history cache (across all shards on one host).
+# 100MB default. Raise on hosts with more memory.
+history.hostLevelCacheMaxSizeBytes:
+  - value: 100000000
+
+# Maximum global persistence QPS across all history hosts.
+history.persistenceGlobalMaxQPS:
+  - value: 36000
+
+# Maximum persistence QPS per history host.
+history.persistenceMaxQPS:
+  - value: 16000
+
+# Maximum persistence QPS per shard per namespace.
+history.persistencePerShardNamespaceMaxQPS:
+  - value: 500
+
+# ---------------------------------------------------------------------------
+# Matching
+# ---------------------------------------------------------------------------
+
+# Number of read partitions per task queue.
+# Raise for high-throughput task queues. Lower for lightly used ones.
+matching.numTaskqueueReadPartitions:
+  - value: 4
+    constraints: {}
+
+# Number of write partitions per task queue. Keep in sync with read partitions.
+matching.numTaskqueueWritePartitions:
+  - value: 4
+    constraints: {}
+
+# Maximum pending task appends before backpressure kicks in.
+matching.outstandingTaskAppendsThreshold:
+  - value: 500
+
+# Maximum persistence QPS for matching.
+matching.persistenceMaxQPS:
+  - value: 2400
+
+# Number of priority levels for task queues (requires fairness enabled).
+matching.priorityLevels:
+  - value: 10
+
+# ---------------------------------------------------------------------------
+# Worker
+# ---------------------------------------------------------------------------
+
+# Maximum RPS for scheduler namespace workflow starts.
+worker.schedulerNamespaceStartWorkflowRPS:
+  - value: 100
+
+# Number of internal worker goroutines per namespace.
+worker.perNamespaceWorkerCount:
+  - value: 4
+
+# Poller and activity concurrency for the internal worker per namespace.
+worker.perNamespaceWorkerOptions:
+  - value:
+      MaxConcurrentWorkflowTaskPollers: 25
+      MaxConcurrentActivityTaskPollers: 10
