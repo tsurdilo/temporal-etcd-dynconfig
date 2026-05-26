@@ -128,3 +128,17 @@ worker.perNamespaceWorkerOptions:
   - value:
       MaxConcurrentWorkflowTaskPollers: 25
       MaxConcurrentActivityTaskPollers: 10
+
+# ---------------------------------------------------------------------------
+# Archival
+# ---------------------------------------------------------------------------
+
+# history.archivalProcessorArchiveDelay and system.namespaceMinRetentionLocal
+# are intentionally NOT seeded here so the server compiled-in defaults apply:
+#
+#   history.archivalProcessorArchiveDelay  → 5 min (with full jitter, so 0–5 min)
+#   system.namespaceMinRetentionLocal      → 1 h  (floor for local namespace retention)
+#
+# To test archival quickly, set them temporarily via etcdctl (see
+# server/archiver/README.md § "Testing archival locally") then delete them
+# when done so normal behaviour is restored.
