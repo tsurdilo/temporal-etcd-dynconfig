@@ -445,7 +445,7 @@ Pass `metrics.NoopMetricsHandler` to `NewClient` to disable dynconfig metrics en
 
 ### Emitted metrics
 
-All metrics inherit any tags set on the `metrics.Handler` passed to `NewClient` — for example, `service_name` if the caller scoped the handler with `metricsHandler.WithTags(metrics.StringTag("service_name", "frontend"))`.
+All metrics inherit any tags set on the handler passed to `NewClient`. `WithTags` returns a new derived handler — it does not mutate the original — so scoping the etcd client's handler with `service_name` has no effect on Temporal server metrics, which use the original handler and apply their own tags internally.
 
 | Metric | Type | Tags | Description |
 |---|---|---|---|
